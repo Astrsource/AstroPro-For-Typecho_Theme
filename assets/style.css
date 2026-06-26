@@ -11230,9 +11230,10 @@ span.gh-lang-dot {
     width: 2px;
     background: var(--accent);
     border-radius: 1px;
+}
+.music-player.playing .playlist-playing-indicator .bar {
     animation: musicPlaylistBar 0.8s ease-in-out infinite;
 }
-
 .playlist-playing-indicator .bar:nth-child(1) { height: 6px; animation-delay: 0s; }
 .playlist-playing-indicator .bar:nth-child(2) { height: 12px; animation-delay: 0.2s; }
 .playlist-playing-indicator .bar:nth-child(3) { height: 8px; animation-delay: 0.4s; }
