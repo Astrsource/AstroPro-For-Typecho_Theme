@@ -10,11 +10,6 @@ if (!defined('__TYPECHO_ROOT_DIR__')) { exit; }
 
 // 遍历文章列表
 while ($this->next()) {
-    
-    // 只在首页跳过已置顶的 CID，避免分类页/标签页丢失文章
-    if ($this->is('index') && AstroPro::isStickyCid($this->cid)) {
-        continue;
-    }
 
     // 缩略图
     $thumb = ThumbnailHelper::showThumbnail($this, true);

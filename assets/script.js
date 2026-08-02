@@ -1797,13 +1797,14 @@ $(function () {
     let volume = 0.5;
     let isDragging = false;
     let isVolumeDragging = false;
-    let isSimulated = false;
-    let simTimer = null;
-    let simCurrentTime = 0;
-    let simDuration = 225;
+    let playIntent = false;       // 用户有播放意图：重新获取链接成功后继续播放
+    let loadWatchdog = null;      // 链接加载超时看门狗
     let autoplayBlocked = false;
     let pendingAutoplay = false;
     let dragPercent = 0;
+
+    const LOAD_TIMEOUT_MS = 8000; // 超过 8 秒未加载出元数据视为链接超时
+    const LINK_RETRY_LIMIT = 3;   // 同一首歌连续重新获取链接的最大次数
 
     // ========== 修复：前台 localStorage 优先级高于后台配置 ==========
     let isRandomAutoplay;
@@ -1856,20 +1857,14 @@ $(function () {
     });
 
     function togglePlay() {
-        if (isSimulated) {
-            isPlaying = !isPlaying;
-            updatePlayState();
-            if (isPlaying) {
-                startSimProgress();
-                showSnackbar('开始播放：' + playlist[currentIndex].title, 'info');
-            } else {
-                stopSimProgress();
-                showSnackbar('已暂停播放歌曲', 'info');
-            }
+        const track = playlist[currentIndex];
+        if (!track.src) {
+            showSnackbar('正在获取播放链接，请稍候...', 'info');
             return;
         }
 
         if (audio.paused) {
+            playIntent = true;
             audio.play().then(function() {
                 isPlaying = true;
                 autoplayBlocked = false;
@@ -1885,10 +1880,11 @@ $(function () {
                     showSnackbar('点击页面任意位置开始播放音乐', 'info');
                 } else {
                     console.error('播放失败:', err);
-                    showSnackbar('音频加载失败，请检查文件路径', 'error');
+                    // 链接类错误交给 audio 'error' 事件统一走重新获取流程
                 }
             });
         } else {
+            playIntent = false;
             audio.pause();
             isPlaying = false;
             updatePlayState();
@@ -1927,12 +1923,7 @@ $(function () {
         updateProgressUI(percent * 100);
 
         let displayTime;
-        if (isSimulated) {
-            displayTime = Math.floor(percent * simDuration);
-            if (apply) {
-                simCurrentTime = displayTime;
-            }
-        } else if (audio.duration) {
+        if (audio.duration) {
             displayTime = percent * audio.duration;
             if (apply) {
                 audio.currentTime = displayTime;
@@ -1943,10 +1934,7 @@ $(function () {
 
     // 新增：真正执行跳转
     function applySeek(percent) {
-        if (isSimulated) {
-            simCurrentTime = Math.floor(percent * simDuration);
-            $currentTime.text(formatTime(simCurrentTime));
-        } else if (audio.duration) {
+        if (audio.duration) {
             audio.currentTime = percent * audio.duration;
             $currentTime.text(formatTime(audio.currentTime));
         }
@@ -1989,7 +1977,7 @@ $(function () {
     // ============================================
 
     audio.addEventListener('timeupdate', function() {
-        if (!isSimulated && !isDragging && audio.duration) {
+        if (!isDragging && audio.duration) {
             const percent = (audio.currentTime / audio.duration) * 100;
             updateProgressUI(percent);
             $currentTime.text(formatTime(audio.currentTime));
@@ -1997,7 +1985,9 @@ $(function () {
     });
 
     audio.addEventListener('loadedmetadata', function() {
-        if (!isSimulated && audio.duration) {
+        clearLoadWatchdog();
+        playlist[currentIndex]._retryCount = 0; // 链接可用，重置重试计数
+        if (audio.duration) {
             const actualDuration = formatTime(audio.duration);
             $duration.text(actualDuration);
             playlist[currentIndex].fallbackDuration = actualDuration;
@@ -2005,105 +1995,109 @@ $(function () {
         }
     });
 
+    audio.addEventListener('playing', function() {
+        clearLoadWatchdog();
+    });
+
     audio.addEventListener('ended', function() {
-        if (!isSimulated) {
-            if (isRepeat) {
-                audio.currentTime = 0;
-                audio.play();
-            } else {
-                nextTrack();
-            }
+        if (isRepeat) {
+            audio.currentTime = 0;
+            audio.play();
+        } else {
+            nextTrack();
         }
     });
 
     audio.addEventListener('error', function(e) {
         console.error('音频加载错误:', e);
-        if (isSimulated) return;
-
-        const track = playlist[currentIndex];
-        if (!track || !track.src) {
-            showSnackbar('无音频源，切换为演示模式', 'warning');
-            enterSimulatedMode();
-            return;
-        }
-
-        // 如果已经尝试过刷新，直接进入模拟模式
-        if (track._refreshed) {
-            showSnackbar('链接已刷新过但仍无效，切换为演示模式', 'warning');
-            enterSimulatedMode();
-            return;
-        }
-
-        // 有 source / rawId 且尚未在刷新中 → 请求后端刷新链接
-        if (track.source && track.rawId && !track._refreshing) {
-            track._refreshing = true;
-            showSnackbar('链接过期，正在获取新链接...', 'info');
-
-            fetch('/?action=refresh-music-url&source=' + encodeURIComponent(track.source) + '&raw_id=' + encodeURIComponent(track.rawId))
-                .then(function(res) { return res.json(); })
-                .then(function(data) {
-                    track._refreshing = false;
-                    if (data.success && data.url) {
-                        // 更新播放列表中的链接并加载
-                        track.src = data.url;
-                        track._refreshed = true;
-                        loadTrack(currentIndex);
-                        if (isPlaying) {
-                            audio.play().catch(function() {
-                                showSnackbar('新链接播放失败，切换为演示模式', 'warning');
-                                enterSimulatedMode();
-                            });
-                        }
-                    } else {
-                        track._refreshed = true;
-                        showSnackbar('链接刷新失败，切换为演示模式', 'error');
-                        enterSimulatedMode();
-                    }
-                })
-                .catch(function() {
-                    track._refreshing = false;
-                    track._refreshed = true;
-                    showSnackbar('网络错误，刷新失败，切换为演示模式', 'error');
-                    enterSimulatedMode();
-                });
-        } else {
-            // 无法刷新（缺 source / rawId 或正在刷新中）
-            showSnackbar('无法自动刷新链接，切换为演示模式，请手动刷新页面', 'warning');
-            enterSimulatedMode();
-        }
+        clearLoadWatchdog();
+        handleTrackError('音频加载失败');
     });
+
+    // ========== 链接超时/失效处理：固定重新获取新链接（无演示模式） ==========
+
+    function clearLoadWatchdog() {
+        if (loadWatchdog) {
+            clearTimeout(loadWatchdog);
+            loadWatchdog = null;
+        }
+    }
+
+    function startLoadWatchdog() {
+        clearLoadWatchdog();
+        loadWatchdog = setTimeout(function() {
+            loadWatchdog = null;
+            // 元数据迟迟未加载出来 → 视为链接超时，走重新获取流程
+            if (audio.readyState < 1) {
+                handleTrackError('链接超时');
+            }
+        }, LOAD_TIMEOUT_MS);
+    }
+
+    // 链接失败/超时统一入口：有平台来源则重新获取新链接，否则仅提示
+    function handleTrackError(reason) {
+        const track = playlist[currentIndex];
+        if (!track) return;
+
+        if (track.source && track.rawId) {
+            refreshTrackUrl(track);
+        } else {
+            showSnackbar(reason + '，无法自动获取新链接', 'error');
+        }
+    }
+
+    // 请求后端强制刷新播放链接并重新加载
+    function refreshTrackUrl(track) {
+        if (track._refreshing) return;
+
+        track._retryCount = (track._retryCount || 0) + 1;
+        if (track._retryCount > LINK_RETRY_LIMIT) {
+            showSnackbar('多次获取新链接仍失败：' + track.title, 'error');
+            return;
+        }
+
+        track._refreshing = true;
+        showSnackbar('链接超时或已过期，正在重新获取...', 'info');
+
+        fetch('/?action=refresh-music-url&source=' + encodeURIComponent(track.source) + '&raw_id=' + encodeURIComponent(track.rawId))
+            .then(function(res) { return res.json(); })
+            .then(function(data) {
+                track._refreshing = false;
+                if (data.success && data.url) {
+                    track.src = data.url;
+                    if (playlist[currentIndex] !== track) return; // 期间已切歌，仅更新链接
+                    enterRealMode(track.src);
+                    if (playIntent || isPlaying) {
+                        audio.play().then(function() {
+                            isPlaying = true;
+                            updatePlayState();
+                        }).catch(function(err) {
+                            if (err.name === 'NotAllowedError') {
+                                autoplayBlocked = true;
+                                pendingAutoplay = true;
+                                isPlaying = false;
+                                updatePlayState();
+                                bindFirstInteraction();
+                            }
+                            // 其他错误交给 audio 'error' 事件继续走重新获取流程
+                        });
+                    }
+                } else {
+                    // 后端解析失败 → 按重试上限再次尝试
+                    refreshTrackUrl(track);
+                }
+            })
+            .catch(function() {
+                track._refreshing = false;
+                refreshTrackUrl(track);
+            });
+    }
 
     function formatTime(seconds) {
         if (isNaN(seconds)) return '0:00';
         const m = Math.floor(seconds / 60);
         const s = Math.floor(seconds % 60);
         return m + ':' + (s < 10 ? '0' : '') + s;
-    }
-
-    function startSimProgress() {
-        stopSimProgress();
-        simTimer = setInterval(function() {
-            if (!isDragging) {
-                simCurrentTime += 1;
-                if (simCurrentTime >= simDuration) {
-                    if (isRepeat) {
-                        simCurrentTime = 0;
-                    } else {
-                        nextTrack();
-                        return;
-                    }
-                }
-                const percent = (simCurrentTime / simDuration) * 100;
-                updateProgressUI(percent);
-                $currentTime.text(formatTime(simCurrentTime));
-            }
-        }, 1000);
-    }
-    function stopSimProgress() {
-        if (simTimer) {
-            clearInterval(simTimer);
-            simTimer = null;
-        }
     }
 
     function setVolume(vol) {
@@ -2113,9 +2107,7 @@ $(function () {
         if ($volumeThumb.length) {
             $volumeThumb.css('left', volPercent + '%');
         }
-        if (!isSimulated) {
-            audio.volume = volume;
-        }
+        audio.volume = volume;
         updateVolumeIcon();
     }
 
@@ -2251,29 +2243,18 @@ $(function () {
         });
     }
 
-    function enterSimulatedMode() {
-        isSimulated = true;
-        audio.pause();
-        audio.src = '';
-        simCurrentTime = 0;
-        simDuration = parseDuration(playlist[currentIndex].fallbackDuration);
-        $duration.text(playlist[currentIndex].fallbackDuration);
-        updateProgressUI(0);
-        $currentTime.text('0:00');
-    }
-
     function enterRealMode(src) {
-        isSimulated = false;
-        stopSimProgress();
         audio.src = src;
         audio.volume = volume;
         audio.load();
+        startLoadWatchdog();
         $duration.text(playlist[currentIndex].fallbackDuration);
     }
 
     function loadTrack(index) {
         currentIndex = index;
         const track = playlist[index];
+        track._retryCount = 0; // 切歌后重新计算重试次数
 
         $trackTitle.text(track.title);
         $trackArtist.text(track.artist);
@@ -2285,16 +2266,16 @@ $(function () {
         if (track.src) {
             enterRealMode(track.src);
         } else {
-            enterSimulatedMode();
+            // 无直链：清空音频元素并走重新获取流程
+            clearLoadWatchdog();
+            audio.pause();
+            audio.removeAttribute('src');
+            audio.load();
+            handleTrackError('无音频源');
         }
 
         updateProgressUI(0);
         $currentTime.text('0:00');
-    }
-
-    function parseDuration(timeStr) {
-        const parts = timeStr.split(':');
-        return parseInt(parts[0]) * 60 + parseInt(parts[1]);
     }
 
     function nextTrack() {
@@ -2307,75 +2288,59 @@ $(function () {
         } else {
             next = (currentIndex + 1) % playlist.length;
         }
+
+        playIntent = true;
         loadTrack(next);
 
-        if (isSimulated) {
-            simCurrentTime = 0;
-            updateProgressUI(0);
-            $currentTime.text('0:00');
-            startSimProgress();
+        const track = playlist[currentIndex];
+        if (!track.src) return; // 无直链：loadTrack 已触发重新获取，成功后自动播放
+
+        audio.currentTime = 0;
+        audio.play().then(function() {
             isPlaying = true;
+            autoplayBlocked = false;
+            pendingAutoplay = false;
             updatePlayState();
-            showSnackbar('正在播放：' + playlist[currentIndex].title, 'info');
-        } else {
-            audio.currentTime = 0;
-            audio.play().then(function() {
-                isPlaying = true;
-                autoplayBlocked = false;
-                pendingAutoplay = false;
+            showSnackbar('正在播放：' + track.title, 'info');
+        }).catch(function(err) {
+            if (err.name === 'NotAllowedError') {
+                autoplayBlocked = true;
+                pendingAutoplay = true;
+                isPlaying = false;
                 updatePlayState();
-                showSnackbar('正在播放：' + playlist[currentIndex].title, 'info');
-            }).catch(function(err) {
-                if (err.name === 'NotAllowedError') {
-                    autoplayBlocked = true;
-                    pendingAutoplay = true;
-                    isPlaying = false;
-                    updatePlayState();
-                    bindFirstInteraction();
-                }
-                // 其他错误（403 等）交给 audio 'error' 事件统一处理
-                // 不再直接进入模拟模式，让刷新逻辑有机会执行
-            });
-        }
+                bindFirstInteraction();
+            }
+            // 其他错误（403 等）交给 audio 'error' 事件统一处理
+            // 由刷新逻辑重新获取新链接
+        });
     }
 
     function prevTrack() {
         const prev = (currentIndex - 1 + playlist.length) % playlist.length;
+
+        playIntent = true;
         loadTrack(prev);
 
-        if (isSimulated) {
-            simCurrentTime = 0;
-            updateProgressUI(0);
-            $currentTime.text('0:00');
-            startSimProgress();
+        const track = playlist[currentIndex];
+        if (!track.src) return;
+
+        audio.currentTime = 0;
+        audio.play().then(function() {
             isPlaying = true;
+            autoplayBlocked = false;
+            pendingAutoplay = false;
             updatePlayState();
-            showSnackbar('正在播放：' + playlist[currentIndex].title, 'info');
-        } else {
-            audio.currentTime = 0;
-            audio.play().then(function() {
-                isPlaying = true;
-                autoplayBlocked = false;
-                pendingAutoplay = false;
+            showSnackbar('正在播放：' + track.title, 'info');
+        }).catch(function(err) {
+            if (err.name === 'NotAllowedError') {
+                autoplayBlocked = true;
+                pendingAutoplay = true;
+                isPlaying = false;
                 updatePlayState();
-                showSnackbar('正在播放：' + playlist[currentIndex].title, 'info');
-            }).catch(function(err) {
-                if (err.name === 'NotAllowedError') {
-                    autoplayBlocked = true;
-                    pendingAutoplay = true;
-                    isPlaying = false;
-                    updatePlayState();
-                    bindFirstInteraction();
-                } else {
-                    console.error('切歌播放失败:', err);
-                    showSnackbar('音频加载失败，切换为演示模式', 'warning');
-                    enterSimulatedMode();
-                    startSimProgress();
-                    isPlaying = true;
-                    updatePlayState();
-                }
-            });
-        }
+                bindFirstInteraction();
+            }
+            // 其他错误交给 audio 'error' 事件统一走重新获取流程
+        });
     }
 
     $nextBtn.on('click', nextTrack);
@@ -2387,40 +2352,42 @@ $(function () {
             togglePlay();
             return;
         }
+
+        playIntent = true;
         loadTrack(index);
+
+        const track = playlist[currentIndex];
+        if (!track.src) {
+            showSnackbar('正在获取播放链接，请稍候...', 'info');
+            return;
+        }
+
         if (!isPlaying) {
             togglePlay();
         } else {
-            if (isSimulated) {
-                simCurrentTime = 0;
-                updateProgressUI(0);
-                $currentTime.text('0:00');
-                startSimProgress();
-            } else {
-                audio.currentTime = 0;
-                audio.play().catch(function(err) {
-                    if (err.name === 'NotAllowedError') {
-                        autoplayBlocked = true;
-                        pendingAutoplay = true;
-                        isPlaying = false;
-                        updatePlayState();
-                        bindFirstInteraction();
-                    } else {
-                        enterSimulatedMode();
-                        startSimProgress();
-                    }
-                });
-            }
-            showSnackbar('正在播放：' + playlist[index].title, 'info');
+            audio.currentTime = 0;
+            audio.play().catch(function(err) {
+                if (err.name === 'NotAllowedError') {
+                    autoplayBlocked = true;
+                    pendingAutoplay = true;
+                    isPlaying = false;
+                    updatePlayState();
+                    bindFirstInteraction();
+                }
+                // 其他错误交给 audio 'error' 事件统一走重新获取流程
+            });
+            showSnackbar('正在播放：' + track.title, 'info');
         }
     });
 
     function handleAutoplay() {
         if (isRandomAutoplay) {
             const randomIndex = Math.floor(Math.random() * playlist.length);
+            playIntent = true;
             loadTrack(randomIndex);
             setTimeout(function() {
                 if (!isPlaying) {
+                    if (!playlist[currentIndex].src) return; // 等待重新获取链接，成功后自动播放
                     audio.play().then(function() {
                         isPlaying = true;
                         autoplayBlocked = false;
@@ -2436,11 +2403,7 @@ $(function () {
                             showSnackbar('点击页面任意位置开始播放音乐', 'info');
                         } else {
                             console.error('随机自动播放失败:', err);
-                            showSnackbar('音频加载失败，切换为演示模式', 'warning');
-                            enterSimulatedMode();
-                            startSimProgress();
-                            isPlaying = true;
-                            updatePlayState();
+                            // 交给 audio 'error' 事件统一走重新获取流程
                         }
                     });
                 }
@@ -2452,11 +2415,13 @@ $(function () {
             return track.autoplay === true;
         });
         if (autoIndex !== -1) {
+            playIntent = true;
             if (autoIndex !== currentIndex) {
                 loadTrack(autoIndex);
             }
             setTimeout(function() {
                 if (!isPlaying) {
+                    if (!playlist[currentIndex].src) return; // 等待重新获取链接，成功后自动播放
                     audio.play().then(function() {
                         isPlaying = true;
                         autoplayBlocked = false;
@@ -2472,7 +2437,7 @@ $(function () {
                             showSnackbar('点击页面任意位置开始播放音乐', 'info');
                         } else {
                             console.error('自动播放失败:', err);
-                            showSnackbar('音频加载失败，请检查文件路径', 'error');
+                            // 交给 audio 'error' 事件统一走重新获取流程
                         }
                     });
                 }
@@ -2516,7 +2481,12 @@ $(function () {
     });
 
     $('#musicDownloadBtn').on('click', function () {
-        window.open(playlist[currentIndex].src, '_blank');
+        const src = playlist[currentIndex].src;
+        if (!src) {
+            showSnackbar('暂无可用下载链接', 'warning');
+            return;
+        }
+        window.open(src, '_blank');
     });
 
     function updateRandomAutoplayUI() {

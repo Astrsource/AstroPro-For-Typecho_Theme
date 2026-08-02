@@ -59,6 +59,21 @@ $GLOBALS['music_http']  = new HttpClient();
 
 // ==================== 主题初始化 ====================//
 function themeInit($self) {
+    // 修复 1.3.0 版本中 Widget_Archive 类的 row 属性缓存问题
+    $ref = new \ReflectionProperty(\Typecho\Widget::class, 'row');
+    //$ref->setAccessible(true); PHP8.1及以上不需要
+    $row = $ref->getValue($self);
+    // 清除 1.3.0 __get() 缓存的派生属性
+    // 这些属性在 singleHandle 中已被动生成缓存，需清除后才会重新触发钩子
+    unset(
+        $row['#content'],
+        $row['#excerpt'],
+        $row['#plainExcerpt'],
+        $row['#summary'],
+        $row['#description']
+    );
+    $ref->setValue($self, $row);
+
     // ==================== Ajax 评论提交 / 回复 ====================
     if ($self->is('single') && $self->request->isPost() && $self->request->get('themeAction') === 'comment') {
         ajaxComment($self);

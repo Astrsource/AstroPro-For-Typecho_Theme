@@ -116,15 +116,14 @@ if ($this->options->isBanner) {
 <?php } ?>
 <!-- ==================== 主内容区：文章列表 ==================== -->
 <section class="content-area">
-<?php if (!empty($this->options->sticky)&& $this->_currentPage == 1) { ?>
-<!-- ==================== 置顶文章 ==================== -->
-<?php
-$this->need('includes/stickyposts.php');
-} 
-?>
+<?php $this->need('includes/stickyposts.php'); ?>
 <!-- ==================== 文章列表 ==================== -->
 <main id="main-content" class="cards-list">
-<?php $this->need('includes/articlelists.php'); ?>
+<?php
+// 应用置顶文章分页修正（仅首页生效）
+AstroPro::applyStickyPagination($this);
+$this->need('includes/articlelists.php');
+?>
 </main>
 <!-- 分页 -->
 <?php

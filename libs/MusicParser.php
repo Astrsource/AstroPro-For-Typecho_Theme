@@ -692,11 +692,13 @@ class MusicParserFactory
             ];
         }
 
+        $url = !empty($attrs['url']) ? str_replace('http://', 'https://', $attrs['url']) : '';
+        $pic = !empty($attrs['pic']) ? str_replace('http://', 'https://', $attrs['pic']) : '';
         $manual = [
             'name'     => $attrs['title'] ?? '',
             'artist'   => $attrs['artist'] ?? '未知歌手',
-            'url'      => $attrs['url'] ?? '',
-            'pic'      => $attrs['pic'] ?? '',
+            'url'      => $url,
+            'pic'      => $pic,
             'source'   => 'manual',
             'raw_id'   => '',
             'autoplay' => $autoplay
